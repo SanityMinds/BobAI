@@ -346,7 +346,7 @@ def run_bot():
 @bot.event
 async def on_ready():
     global reply_queue
-    reply_queue = asyncio.Queue(loop=bot.loop)  # Ensure queue uses the bot's event loop
+    reply_queue = asyncio.Queue()
     bot.loop.create_task(process_queue())
     random_message_task.start()
     logging.info(f'Logged in as {bot.user}!')
