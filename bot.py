@@ -44,7 +44,7 @@ def get_angry_system_message(server_name, timestamp):
 keywords = ["bob", "welcome", "hello", "hi", "haii", "hewwo", "hiii","afternoon","evening","good morning","morning","good","bot","AI","ai"]
 
 blocklist = ["159985870458322944","1116086186172219473","1121850238311870484","928488973490339890"] # Block user IDs from interacting
-server_blacklist = ["1116236794267189248", "SERVER_ID_2", "SERVER_ID_3"] # Block servers from interacting
+server_blacklist = ["1116236794267189248", "964215087546134578", "SERVER_ID_3"] # Block servers from interacting
 
 
 def connect_db():
@@ -113,50 +113,87 @@ def trim_conversation_history(history):
 async def get_ai_response(channel_id, user_message, username, server_name):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     history = load_conversation_history(channel_id)
+
+    # Ensure a system message exists at the start of the conversation
     if not history or history[0]['role'] != 'system':
         history.insert(0, get_angry_system_message(server_name, timestamp))
+
+    # Append the latest user message to the conversation history
     history.append({"role": "user", "content": f"{username} sent: {user_message}"})
     history = trim_conversation_history(history)
 
     async with aiohttp.ClientSession() as session:
-        for attempt in range(1, 6):  # Retry up to 5 times
+        for attempt in range(1, 4):  # Retry up to 3 times
             try:
                 async with session.post(
-                    "https://api.zukijourney.com/unf/chat/completions",
-                    headers={"Authorization": "Bearer TOKEN"},
+                    "https://api.zukijourney.com/v1/chat/completions",
+                    headers={"Authorization": f"Bearer TOKEN"},
                     json={
                         "model": "euryale-70b",
                         "messages": history,
                         "temperature": 0.7,
                         "tokens": 100,
-                        "max_tokens": 100
+                        "max_tokens": 100,
                     }
                 ) as response:
+                    response_body = await response.text()  # API full response as string for logging/debugging
+                    logging.info(f"API Response (Status {response.status}): {response_body}")
+
                     if response.status == 200:
+                        # Parse successful response
                         data = await response.json()
                         ai_response = data['choices'][0]['message']['content']
+
+                        # Add the AI's response to history and save
                         history.append({"role": "assistant", "content": ai_response})
                         save_conversation_history(channel_id, history)
-                        ai_response = ai_response.replace("bob:", "").replace("Bob:", "").replace(":", "")
-                        return ai_response, data  # Return full response data
+
+                        # Clean up and return only the AI content (not the full API response)
+                        ai_response = ai_response.replace("bob:", "").replace("Bob:", "").replace(":", "").strip()
+                        return ai_response, data  # Primary AI response & raw API response (for internal use)
+
                     elif response.status == 429:
-                        logging.warning(f"Rate limited. Attempt {attempt}. Retrying...")
+                        # Handle rate-limiting response
+                        logging.warning(f"Rate limited on attempt {attempt}, retrying...")
                         await asyncio.sleep(2 ** attempt)
+
+                    elif response.status in [401, 403]:
+                        # Authentication or permission errors
+                        logging.error(
+                            f"API Authentication Error (Status {response.status}): {response_body}"
+                        )
+                        return "The AI could not authenticate properly. Check the bot configuration.", None
+
                     else:
-                        reset_conversation_history(channel_id)
-                        logging.error("The AI failed to generate a response. Please try again later.")
-                        return "The AI failed to generate a response. Please try again later.", None
+                        # Handle other HTTP error statuses
+                        logging.error(
+                            f"Unexpected API Error (Status {response.status}): {response_body}"
+                        )
+                        break  # Stop retries for unrecoverable errors
+
             except Exception as e:
-                logging.error(f"Error while communicating with the API: {e}")
+                # Log exceptions during the API call
+                logging.exception(f"Exception during API call: {e}")
                 return "An error occurred while processing your request. Please try again later.", None
 
-async def generate_random_image(message):
+    # If all retries fail
+    logging.error("Max retries reached. The AI failed to generate a response.")
+    return "The AI failed to generate a response. Please try again later.", None
+
+async def generate_random_image(message, ai_response, use_user_prompt=False):
+    """
+    Generates an image using a user-provided message as the prompt (if specified),
+    or a random fallback prompt, and sends it with the AI text response.
+    """
     # Check if the bot has permission to send attachments in the current channel
     permissions = message.channel.permissions_for(message.guild.me) if message.guild is not None else None
     if permissions is not None and not permissions.attach_files:
         logging.warning(f"No permission to send attachments in channel {message.channel.id}")
-        return None
-    image_prompts = [
+        await message.reply(ai_response)  # Send only AI response if no attachment permission
+        return
+
+    # Fallback prompts for random image generation
+    fallback_prompts = [
         "Kamala Harris smoking weed with yellow minions",
         "Sexy donald trump in a bikini and big boobs in his bikini while in a jail cell",
         "Donald trump inside of a plane cockpit in background of 9/11 twin towers burning",
@@ -168,39 +205,56 @@ async def generate_random_image(message):
         "protest with signs saying 'i love cock'",
         "police officer committing violent acts against minorities of color"
     ]
-    if any(keyword in message.content.lower() for keyword in ["generate", "image", "picture"]):
-        prompt = message.content
-    else:
-        prompt = random.choice(image_prompts)
+
+    prompt = message.content if use_user_prompt else random.choice(fallback_prompts)
+    logging.info(f"Using prompt for image generation: {prompt}")
+
     async with aiohttp.ClientSession() as session:
         try:
+            # Call the image generation API
             async with session.post(
                 "https://api.zukijourney.com/v1/images/generations",
                 headers={"Authorization": "Bearer TOKEN"},
                 json={
-                    "model": "flux-1.1-pro-ultra",
+                    "model": "recraft-v3",
                     "prompt": prompt
                 }
             ) as response:
+                response_body = await response.text()  # Get full API response as text
+
                 if response.status == 200:
                     data = await response.json()
                     image_url = data['data'][0]['url']
-                    # Download the image and send as an attachment
+
+                    # Download the image from the generated URL
                     async with session.get(image_url) as image_response:
                         if image_response.status == 200:
                             image_data = await image_response.read()
                             with open('generated_image.jpg', 'wb') as f:
                                 f.write(image_data)
-                            return 'generated_image.jpg'
+
+                            # Send the AI response text alongside the generated image
+                            await message.channel.send(
+                                content=ai_response,  # The AI text response
+                                file=discord.File('generated_image.jpg')  # Attach the image
+                            )
+                            os.remove('generated_image.jpg')  # Clean up the local image file
+                            return
                         else:
-                            logging.error(f"Failed to download image. Status code: {image_response.status}")
-                            return None
+                            logging.error(f"Failed to download image. Status code: {image_response.status}. Response body: {await image_response.text()}")
+                            await message.reply(ai_response)  # Send AI text only
+                            return
                 else:
-                    logging.error(f"Failed to generate image. Status code: {response.status}")
-                    return None
+                    logging.error(
+                        f"Failed to generate image. Status code: {response.status}. Response body: {response_body}"
+                    )
+                    await message.reply(ai_response)  # Send AI text only
+                    return
+
         except Exception as e:
-            logging.error(f"Error while generating image: {e}")
-            return None
+            logging.error(f"Error during image generation: {e}")
+            await message.reply(ai_response)  # Send only the AI response upon failure
+            return
 
 # Queue Processor
 async def process_queue():
@@ -216,66 +270,118 @@ async def process_queue():
 
 async def handle_message(message):
     try:
-        # Simulate typing with a random delay (1.5 to 5 seconds)
-        delay = random.uniform(1.5, 5.0)
-        async with message.channel.typing():
-            await asyncio.sleep(delay)  # Wait for the random delay
+        async with message.channel.typing():  # Simulate bot typing
+            await asyncio.sleep(random.uniform(1.5, 5.0))  # Random delay
+
+            # Generate AI text response
             server_name = message.guild.name if message.guild else "a private chat"
-            response, full_data = await get_ai_response(message.channel.id, message.content, message.author.name, server_name)
+            ai_response, _ = await get_ai_response(
+                message.channel.id, message.content, message.author.name, server_name
+            )
 
-        if response:
-            filtered_response = response.replace("bob:", "").replace("Bob:", "").replace(":", "")
-            
-            # Check if the AI mentions "AI" or "bot" and reset the conversation history
-            if any(term in filtered_response.lower() for term in ["ai", "bot"]):
-                reset_conversation_history(message.channel.id)
-                logging.info(f"Conversation history reset for channel {message.channel.id} due to AI mentioning restricted terms.")
+            if ai_response:
+                # Determine whether to include an image
+                IMAGE_GENERATION_KEYWORDS = ["generate", "image", "picture"]
+                use_user_prompt = any(keyword in message.content.lower() for keyword in IMAGE_GENERATION_KEYWORDS)
+                include_image = use_user_prompt or random.random() < 0.1  # 10% random chance
 
-            # Determine if the bot should generate an image (10% chance)
-            should_generate_image = random.random() < 0.1
+                # Check if the bot has "Attach Files" permission
+                permissions = message.channel.permissions_for(message.guild.me) if message.guild else None
+                can_attach_files = permissions and permissions.attach_files
 
-            if should_generate_image:
-                async with message.channel.typing():
-                    image_path = await generate_random_image(message)
-                    if image_path:
-                        try:
-                            await message.channel.send(content=filtered_response, file=discord.File(image_path))
-                            os.remove(image_path)  # Clean up the file after sending
-                        except discord.errors.Forbidden:
-                            logging.warning(f"Permission denied to send an attachment in channel {message.channel.id}.")
-                    else:
-                        await message.reply(filtered_response)
+                if include_image and can_attach_files:
+                    # Generate and send the image
+                    await generate_random_image(message, ai_response, use_user_prompt=use_user_prompt)
+                else:
+                    # Send plain AI response if no image is attached or permissions are missing
+                    await message.reply(ai_response)
             else:
-                await message.reply(filtered_response)
-        else:
-            await message.add_reaction("❌")
-            logging.error(f"Full API response logged due to failure: {json.dumps(full_data, indent=4)}")
+                # If the AI response fails, react with ❌
+                await message.add_reaction("❌")
+                logging.error("Failed to generate AI response.")
+
     except discord.errors.Forbidden:
-        logging.warning(f"Permission denied to interact in channel {message.channel.id}.")
-    except discord.errors.NotFound:
-        logging.warning(f"Message in channel {message.channel.id} not found.")
-    except discord.errors.HTTPException as e:
-        logging.error(f"HTTPException occurred: {e}")
+        logging.warning(f"Permission denied in channel {message.channel.id}.")
+        await message.add_reaction("❌")
+    except Exception as e:
+        logging.exception(f"An error occurred in handle_message: {e}")
+        await message.add_reaction("❌")
+
+def contains_restricted_word(response, restricted_terms):
+    """
+    Check if a response contains any restricted terms.
+
+    :param response: The response string to check.
+    :param restricted_terms: List of restricted terms.
+    :return: Boolean indicating if the response contains restricted terms.
+    """
+    for term in restricted_terms:
+        if term in response.lower():  # Case insensitive check
+            return True
+    return False
+
 
 @tasks.loop(minutes=30)
 async def random_message_task():
-    guilds = [guild for guild in bot.guilds if guild.member_count > 10 and str(guild.id) not in server_blacklist]
-    if not guilds:
+    """
+    Periodically sends random AI-generated messages in random channels,
+    while respecting the server blacklist and retrying until a valid server is found.
+    """
+    try:
+        # Filter guilds: only include servers that are NOT in the blacklist
+        eligible_guilds = [
+            guild for guild in bot.guilds
+            if guild.member_count > 10 and str(guild.id) not in server_blacklist
+        ]
+
+        if not eligible_guilds:
+            logging.warning("No eligible guilds found for sending random messages.")
+            return  # Stop the task if no servers are eligible
+
+        # Retry mechanism: Allow multiple attempts across eligible servers
+        while eligible_guilds:
+            selected_guild = random.choice(eligible_guilds)
+
+            # Filter channels within the selected guild: only include channels where the bot has send permissions
+            eligible_channels = [
+                channel for channel in selected_guild.text_channels
+                if channel.permissions_for(selected_guild.me).send_messages
+            ]
+
+            if eligible_channels:
+                # If eligible channels are found, proceed to send a message in one of them
+                selected_channel = random.choice(eligible_channels)
+
+                # Generate an AI response for the selected channel
+                ai_response, full_data = await get_ai_response(
+                    selected_channel.id, "Generate a random message", "system", selected_guild.name
+                )
+
+                if ai_response:
+                    try:
+                        # Send the AI response to the selected channel
+                        await selected_channel.send(ai_response)
+                        logging.info(f"Random message sent to channel: {selected_channel.name} in guild: {selected_guild.name}")
+                        return  # Exit after successfully sending the message
+                    except discord.errors.Forbidden:
+                        logging.warning(f"Permission denied to send a message in channel: {selected_channel.id}.")
+                    except discord.errors.HTTPException as e:
+                        logging.error(f"HTTPException occurred while sending a message: {e}")
+                else:
+                    # Log the failure internally but do not send anything to the channel
+                    logging.error(f"Failed to generate a random message for guild: {selected_guild.name}. Full API response: {full_data}")
+                    return  # Stop the task if the AI fails to provide a response
+            else:
+                # No eligible channels in the selected server; remove the guild from the retry list
+                logging.warning(f"No eligible channels found in guild: {selected_guild.name} ({selected_guild.id}).")
+                eligible_guilds.remove(selected_guild)  # Exclude this guild from retries
+
+        # If no valid servers or channels are available
+        logging.warning("No eligible servers/channels available after retries. Task will stop.")
         return
-    guild = random.choice(guilds)
-    channels = [channel for channel in guild.text_channels if channel.permissions_for(guild.me).send_messages]
-    if not channels:
-        return
-    channel = random.choice(channels)
-    server_name = guild.name
-    ai_generated_message = await get_ai_response(channel.id, "Generate a random message", "system", server_name)
-    if ai_generated_message:
-        try:
-            await channel.send(ai_generated_message)
-        except discord.errors.Forbidden:
-            logging.warning(f"Permission denied to send a message in channel {channel.id}.")
-        except discord.errors.HTTPException as e:
-            logging.error(f"HTTPException occurred while sending a message: {e}")
+
+    except Exception as e:
+        logging.exception(f"An error occurred in random_message_task: {e}")
 
 
 @bot.event
@@ -284,32 +390,37 @@ async def on_message(message):
         return
     if str(message.author.id) in blocklist:
         return
-    
 
     user_id = message.author.id
     current_time = asyncio.get_event_loop().time()
 
+    # Rate-limit user interactions
     if user_id in user_message_times:
         last_message_time = user_message_times[user_id]
         if current_time - last_message_time < 5:
-            
             user_message_times[user_id] = current_time
-            await asyncio.sleep(5)
-        else:
-            user_message_times[user_id] = current_time
+            return
     else:
         user_message_times[user_id] = current_time
 
+    # Check for DMs
     if isinstance(message.channel, discord.DMChannel):
         await reply_queue.put(message)
         return
 
+    # Keywords for image generation
+    IMAGE_GENERATION_KEYWORDS = ["generate", "image", "picture"]
+
+    # Check if the bot should respond or generate images
     should_reply = (
-        bot.user in message.mentions or
-        any(keyword in message.content.lower() for keyword in keywords) or
-        random.random() < 0.007 # random reply chance current (0.7%)
+        bot.user in message.mentions
+        or any(keyword in message.content.lower() for keyword in keywords)
+        or random.random() < 0.007  # 0.7% chance of sending random replies
     )
-    if should_reply:
+    generate_image = any(keyword in message.content.lower() for keyword in IMAGE_GENERATION_KEYWORDS)
+
+    # Send the message to the processing queue if it requires any response
+    if should_reply or generate_image:
         await reply_queue.put(message)
 
 
@@ -346,7 +457,7 @@ def run_bot():
 @bot.event
 async def on_ready():
     global reply_queue
-    reply_queue = asyncio.Queue()
+    reply_queue = asyncio.Queue()  # Ensure queue uses the bot's event loop
     bot.loop.create_task(process_queue())
     random_message_task.start()
     logging.info(f'Logged in as {bot.user}!')
@@ -364,7 +475,7 @@ async def main():
     initialize_database()
     asyncio.create_task(schedule_reboot())  # Start the reboot countdown
     async with bot:
-        await bot.start('DISCORD_TOKEN') # Insert your discord bot token
+        await bot.start('BOT_TOKEN') # Insert your discord bot token
 
 # Run the bot
 if __name__ == "__main__":
