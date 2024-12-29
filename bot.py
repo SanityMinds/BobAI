@@ -523,7 +523,12 @@ async def handle_message(message: discord.Message):
                 if len(ai_response) > max_length:
                     # Split the response into chunks of max_length
                     for chunk in [ai_response[i:i+max_length] for i in range(0, len(ai_response), max_length)]:
-                        await message.channel.send(chunk, mention_author=False)
+                        try:
+                            await message.channel.send(chunk, mention_author=False)
+                        except discord.errors.HTTPException as e:
+                            if e.code == 200000:  # Content blocked
+                                await message.add_reaction("❌")
+                                return
                     return
 
                 # Keywords for image generation
@@ -570,7 +575,30 @@ async def handle_message(message: discord.Message):
                             os.remove(output_ogg)
                     return
 
-                await message.reply(ai_response, mention_author=False)
+                try:
+                    await message.reply(ai_response, mention_author=False)
+                except discord.errors.HTTPException as e:
+                    if e.code == 200000:  # Content blocked
+                        logging.warning("Message blocked, retrying AI generation...")
+                        # Retry AI generation once
+                        ai_response_retry, _ = await get_ai_response(
+                            message.channel.id,
+                            message.content,
+                            message.author.name,
+                            server_name
+                        )
+                        if ai_response_retry:
+                            try:
+                                await message.reply(ai_response_retry, mention_author=False)
+                            except discord.errors.HTTPException as retry_error:
+                                if retry_error.code == 200000:  # If retry also fails
+                                    await message.add_reaction("❌")
+                                    logging.error("Retry failed: Content blocked.")
+                                else:
+                                    raise retry_error
+                        else:
+                            await message.add_reaction("❌")
+                            logging.error("Retry failed: AI response generation failed.")
             else:
                 await message.add_reaction("❌")
                 logging.error("Failed to generate AI response.")
