@@ -708,16 +708,55 @@ async def clear_queue(queue: asyncio.Queue):
 
 @bot.event
 async def on_message(message):
+    """
+    Handles all incoming messages to determine if the bot should respond.
+    """
     try:
         if message.author == bot.user:
             return
 
-        if message.guild and str(message.guild.id) in server_blacklist:
-            logging.info(f"Message ignored from blacklisted server: {message.guild.id}")
+        if not message.guild:  # This is a direct message
+            async with message.channel.typing():
+                ai_response, _ = await get_ai_response(
+                    message.channel.id,
+                    message.content,
+                    message.author.name,
+                    "Direct Message"
+                )
+
+                if ai_response:
+                    await message.reply(ai_response, mention_author=False)
+                else:
+                    await message.reply(
+                        "Sorry, I couldn't generate a response. Please try again.",
+                        mention_author=False
+                    )
+            return
+
+        if message.content.strip().lower() in ["!.!reset", "reset !.!", "!.! reset"]:
+            async with message.channel.typing():
+                try:
+                    reset_conversation_history(message.channel.id)
+
+                    if message.channel.id in channel_queues:
+                        await clear_queue(channel_queues[message.channel.id])
+
+                    await message.add_reaction("✅")
+                    logging.info(f"Conversation history and queue reset for channel {message.channel.id}")
+                except Exception as e:
+                    logging.error(f"Error resetting conversation history for channel {message.channel.id}: {e}")
+                    try:
+                        await message.add_reaction("❌")
+                    except discord.errors.Forbidden:
+                        logging.warning(f"Failed to add reaction in channel {message.channel.id}")
             return
 
         if str(message.author.id) in blocklist:
             logging.info(f"Message ignored from blocklisted user: {message.author.id}")
+            return
+
+        if message.guild and str(message.guild.id) in server_blacklist:
+            logging.info(f"Message ignored from blacklisted server: {message.guild.id}")
             return
 
         user_id = message.author.id
@@ -743,39 +782,22 @@ async def on_message(message):
 
         channel_last_reply_times[channel_id][user_id] = current_time
 
-        reset_phrases = ["!.!reset", "!.! reset", "reset !.!"]
-        if message.content.lower() in reset_phrases:
-            try:
-                reset_conversation_history(channel_id)
-
-                if channel_id in channel_queues:
-                    await clear_queue(channel_queues[channel_id])
-
-                await message.add_reaction("✅")
-                logging.info(f"Conversation history and queue reset for channel {channel_id}")
-            except Exception as e:
-                logging.error(f"Error resetting conversation history for channel {channel_id}: {e}")
-                try:
-                    await message.add_reaction("❌")
-                except discord.errors.Forbidden:
-                    logging.warning(f"Failed to add reaction in channel {channel_id}")
-            return
-
         if channel_id not in channel_queues:
             channel_queues[channel_id] = asyncio.Queue()
 
         should_reply = (
             bot.user in message.mentions
-            or any(keyword in message.content.lower() for keyword in keywords)
+            or any(keyword.lower() in message.content.lower() for keyword in keywords)
             or secrets.randbelow(1000) < 7  # 0.7% chance
         )
 
         if should_reply and not queue_contains_message(channel_queues[channel_id], message):
-            try:
-                await channel_queues[channel_id].put(message)
-                logging.info(f"Message {message.id} added to queue for channel {channel_id}")
-            except Exception as e:
-                logging.error(f"Failed to add message {message.id} to queue for channel {channel_id}: {e}")
+            async with message.channel.typing():
+                try:
+                    await channel_queues[channel_id].put(message)
+                    logging.info(f"Message {message.id} added to queue for channel {channel_id}")
+                except Exception as e:
+                    logging.error(f"Failed to add message {message.id} to queue for channel {message.channel.id}: {e}")
 
     except discord.errors.Forbidden as e:
         logging.warning(f"Missing permissions to handle message: {e}")
@@ -783,7 +805,6 @@ async def on_message(message):
         logging.warning(f"Message not found or already deleted: {message.id if hasattr(message, 'id') else 'Unknown'}")
     except Exception as e:
         logging.exception(f"Unhandled error in on_message: {e}")
-
 
 def queue_contains_message(queue, message):
     """
