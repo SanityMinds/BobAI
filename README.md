@@ -8,6 +8,7 @@ Bob AI is a discord self bot which is designed to be an uncensored AI bot. You c
 - **Feature to direct message the server owner information about the bot**
 - **random reply %**
 - **Activated by keywords**
+- **custom commands**: !.!help for commands
 
 ## Installation
 
@@ -18,11 +19,11 @@ do the following commands:
 make sure you have python installed (3.7+)
 warning: **YOU CANNOT HAVE DISCORD.PY AND DISCORD.PY-SELF AT THE SAME TIME. IF THE CODE ERRORS THAT IS PROBABLY WHY**
 
-do "pip3 uninstall discord.py" if its already installed
+do "``pip3 uninstall discord.py``" if its already installed
 
 replace the tokens in the code with your own tokens to get a "zukijourney" token you must go to: [zukijourney](https://zukijourney.com/)
-replace every instance of "DISCORD_TOKEN" with your discord token
-replace every instance of "ZUKIJOURNEY_TOKEN" with your zukijourney token
+replace every instance of "``DISCORD_TOKEN``" with your discord token
+replace every instance of "``ZUKIJOURNEY_TOKEN``" with your zukijourney token
 
 run the bot
 ```python3 bot.py```
