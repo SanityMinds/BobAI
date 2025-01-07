@@ -28,6 +28,9 @@ replace every instance of "``ZUKIJOURNEY_TOKEN``" with your zukijourney token
 run the bot
 ```python3 bot.py```
 
+
+**I WILL NOT HELP YOU SET THIS BOT UP/HOW TO SET IT UP. DO NOT CONTACT ME IF YOU WANT/DONT KNOW WHAT TO DO. ASK SOMEONE ELSE**
+
 ### Obtaining API Key and Token
 
 To use the bot, you'll need an API key and a token:
