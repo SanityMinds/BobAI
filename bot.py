@@ -13,6 +13,7 @@ from aiohttp import ClientSession
 import subprocess
 import secrets
 import base64
+import time
 
 logging.basicConfig(
     level=logging.INFO,
@@ -26,14 +27,13 @@ logging.basicConfig(
 ##############################################################################
 # BOT CONFIG / INITIALIZATION
 ##############################################################################
-bot_token = ""
+bot_token = "DISCORD_TOKEN"
 bot = commands.Bot(command_prefix="!", self_bot=True)
 
 tts_lock = asyncio.Lock()
 
 reply_queue = None
 user_message_times = {}
-
 ##############################################################################
 # PERSONALITY / SYSTEM MESSAGE
 ##############################################################################
@@ -58,11 +58,6 @@ def get_angry_system_message(server_name, timestamp):
 ##############################################################################
 # KEYWORDS
 ##############################################################################
-keywords = [
-    "bob", "welcome", "hello", "hi", "haii", "hewwo", "hiii",
-    "afternoon", "evening", "good morning", "morning", "good",
-    "bot", "AI", "ai"
-]
 
 blocklist = [
     "159985870458322944",
@@ -71,16 +66,15 @@ blocklist = [
     "928488973490339890",
     "1299449139985387591",
     "1043538457483546674"
-]  # User IDs blocked from interacting
+]
 
 server_blacklist = [
     "1116236794267189248",
     "964215087546134578",
     "SERVER_ID_3"
-]  # Servers blocked from interacting
+]
 
 
-# List of user IDs who can bypass the default cooldown
 bypass_user_ids = [
     1234,
 ]
@@ -140,10 +134,45 @@ def setup_database():
             content TEXT
         )
     ''')
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS channel_settings (
+            channel_id TEXT PRIMARY KEY,
+            model TEXT DEFAULT 'grok-2-larp'
+        )
+    ''')
     conn.commit()
     conn.close()
 
 initialize_database()
+
+
+def set_ai_model(channel_id, model):
+    conn = connect_db()
+    try:
+        c = conn.cursor()
+        c.execute('''
+            INSERT INTO channel_settings (channel_id, model)
+            VALUES (?, ?)
+            ON CONFLICT(channel_id) DO UPDATE SET model = ?
+        ''', (channel_id, model, model))
+        conn.commit()
+    except sqlite3.Error as e:
+        logging.error(f"Error updating AI model for channel {channel_id}: {e}")
+    finally:
+        conn.close()
+
+def get_ai_model(channel_id):
+    conn = connect_db()
+    try:
+        c = conn.cursor()
+        c.execute('SELECT model FROM channel_settings WHERE channel_id = ?', (channel_id,))
+        row = c.fetchone()
+        return row[0] if row else 'grok-2-larp'
+    except sqlite3.Error as e:
+        logging.error(f"Error fetching AI model for channel {channel_id}: {e}")
+        return 'grok-2-larp'
+    finally:
+        conn.close()
 
 ##############################################################################
 # UTILITY: TRIM HISTORY
@@ -160,13 +189,11 @@ def trim_conversation_history(history):
         history = [system_message] + history[-9:]
     return history
 
+
 ##############################################################################
 # AI TEXT GENERATION
 ##############################################################################
-async def get_ai_response(channel_id, user_message, username, server_name):
-    """
-    Interact with the Zukijourney Chat Completion API to get an AI response.
-    """
+async def get_ai_response(channel_id, user_message, username, server_name, model=None):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     history = load_conversation_history(channel_id)
 
@@ -176,14 +203,17 @@ async def get_ai_response(channel_id, user_message, username, server_name):
     history.append({"role": "user", "content": f"{username} sent: {user_message}"})
     history = trim_conversation_history(history)
 
+    if not model:
+        model = get_ai_model(channel_id)
+
     async with aiohttp.ClientSession() as session:
         for attempt in range(1, 4):  # Up to 3 retries
             try:
                 async with session.post(
                     "https://api.zukijourney.com/v1/chat/completions",
-                    headers={"Authorization": "Bearer "},
+                    headers={"Authorization": "Bearer ZUKIJOURNEY_TOKEN"},
                     json={
-                        "model": "grok-2-larp",
+                        "model": model,  # Use the dynamic model
                         "messages": history,
                         "temperature": 0.7
                     }
@@ -194,6 +224,7 @@ async def get_ai_response(channel_id, user_message, username, server_name):
                     if response.status == 200:
                         data = await response.json()
                         ai_response = data['choices'][0]['message']['content']
+                        # Save the AI response
                         history.append({"role": "assistant", "content": ai_response})
                         save_conversation_history(channel_id, history)
 
@@ -223,7 +254,7 @@ async def get_ai_response(channel_id, user_message, username, server_name):
 ##############################################################################
 async def generate_random_image(message, ai_response, use_user_prompt=False):
     """
-    Generates an image from the Zukijourney image API.  
+    Generates an image from the Zukijourney image API.
     If user_prompt is True, use the user's message as the prompt; otherwise use a random fallback.
     Attaches the generated image along with the AI text response in the reply to the user.
     """
@@ -260,41 +291,54 @@ async def generate_random_image(message, ai_response, use_user_prompt=False):
     prompt = message.content if use_user_prompt else random.choice(fallback_prompts)
     logging.info(f"Using prompt for image generation: {prompt}")
 
-    async with aiohttp.ClientSession() as session:
-        try:
-            async with session.post(
-                "https://api.zukijourney.com/v1/images/generations",
-                headers={"Authorization": "Bearer "},
-                json={"model": "recraft-v3", "prompt": prompt}
-            ) as response:
-                response_body = await response.text()
-                if response.status == 200:
-                    data = await response.json()
-                    image_url = data['data'][0]['url']
+    async def request_image(model):
+        async with aiohttp.ClientSession() as session:
+            try:
+                async with session.post(
+                    "https://api.zukijourney.com/v1/images/generations",
+                    headers={"Authorization": "Bearer ZUKIJOURNEY_TOKEN"},
+                    json={"model": model, "prompt": prompt}
+                ) as response:
+                    response_body = await response.text()
+                    if response.status == 200:
+                        data = await response.json()
+                        return data['data'][0]['url']
+                    else:
+                        logging.error(f"Image Generation Error with model {model} ({response.status}): {response_body}")
+                        return None
+            except Exception as e:
+                logging.error(f"Error during image generation with model {model}: {e}")
+                return None
 
-                    async with session.get(image_url) as image_response:
-                        if image_response.status == 200:
-                            image_data = await image_response.read()
-                            with open('generated_image.jpg', 'wb') as f:
-                                f.write(image_data)
+    image_url = await request_image("recraft-v3")
 
-                            await message.reply(
-                                content=ai_response,
-                                file=discord.File('generated_image.jpg')
-                            )
-                            os.remove('generated_image.jpg')
-                            return
-                        else:
-                            logging.error(
-                                f"Failed to download image. {image_response.status} {await image_response.text()}"
-                            )
-                            await message.reply(ai_response)
+    if not image_url:
+        logging.info("Retrying image generation with stable-image-ultra model...")
+        image_url = await request_image("stable-image-ultra")
+
+    if not image_url:
+        await message.reply(ai_response)
+        return
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(image_url) as image_response:
+                if image_response.status == 200:
+                    image_data = await image_response.read()
+                    with open('generated_image.jpg', 'wb') as f:
+                        f.write(image_data)
+
+                    await message.reply(
+                        content=ai_response,
+                        file=discord.File('generated_image.jpg')
+                    )
+                    os.remove('generated_image.jpg')
                 else:
-                    logging.error(f"Image Generation Error {response.status}: {response_body}")
+                    logging.error(f"Failed to download image: {image_response.status} {await image_response.text()}")
                     await message.reply(ai_response)
-        except Exception as e:
-            logging.error(f"Error during image generation: {e}")
-            await message.reply(ai_response)
+    except Exception as e:
+        logging.error(f"Error during image generation: {e}")
+        await message.reply(ai_response)
 
 ##############################################################################
 # VOICE MESSAGE HELPER FUNCTIONS
@@ -355,7 +399,7 @@ async def generate_voice_audio(text: str) -> str:
         try:
             async with session.post(
                 "https://api.zukijourney.com/v1/audio/speech",
-                headers={"Authorization": "Bearer "},
+                headers={"Authorization": "Bearer ZUKIJOURNEY_TOKEN"},
                 json={
                     "input": text,
                     "voice": "mrbeast",
@@ -428,7 +472,7 @@ async def send_voice_message(channel: discord.TextChannel, file_path: str):
             json=upload_request_json,
             headers={
                 "Content-Type": "application/json",
-                "Authorization": ""
+                "Authorization": "DISCORD_TOKEN"
             }
         ) as r:
             if r.status != 200:
@@ -446,7 +490,7 @@ async def send_voice_message(channel: discord.TextChannel, file_path: str):
 
         put_headers = {
             "Content-Type": "audio/ogg",
-            "Authorization": ""
+            "Authorization": "DISCORD_TOKEN"
         }
         async with session.put(upload_url, data=audio_data, headers=put_headers) as put_resp:
             if put_resp.status not in [200, 201]:
@@ -458,7 +502,7 @@ async def send_voice_message(channel: discord.TextChannel, file_path: str):
         encoded_waveform = base64.b64encode(bytes(placeholder_waveform)).decode("utf-8")
 
         voice_msg_json = {
-            "flags": 8192,  # IS_VOICE_MESSAGE
+            "flags": 8192,
             "attachments": [
                 {
                     "id": "0",
@@ -476,7 +520,7 @@ async def send_voice_message(channel: discord.TextChannel, file_path: str):
             json=voice_msg_json,
             headers={
                 "Content-Type": "application/json",
-                "Authorization": ""
+                "Authorization": "DISCORD_TOKEN"
             }
         ) as post_resp:
             if post_resp.status != 200:
@@ -489,7 +533,7 @@ async def send_voice_message(channel: discord.TextChannel, file_path: str):
 # REPLY QUEUE + MESSAGE HANDLER
 ##############################################################################
 async def process_queue():
-    tasks_map = {}  # Track tasks by channel_id
+    tasks_map = {}
 
     while True:
         await asyncio.sleep(0.001)
@@ -503,10 +547,10 @@ async def process_channel_queue(channel_id, queue):
     Processes messages in a specific channel's queue.
     """
     while not queue.empty():
-        message = await queue.get()
+        message = await queue.get()  # Get the next message from the queue
         try:
             logging.info(f"Processing message {message.id} in channel {channel_id}")
-            await handle_message(message)
+            await handle_message(message)  # Process the message
         except Exception as e:
             logging.error(f"Error processing message in channel {channel_id}: {e}")
 
@@ -514,8 +558,8 @@ channel_queues = {}
 
 async def handle_message(message: discord.Message):
     """
-    Wrap handle_message logic with a global concurrency semaphore
-    to avoid processing too many messages in parallel.
+    Handles an incoming message and processes it through the bot logic.
+    Simulates typing, handles permissions, and generates AI responses or other outputs.
     """
     async with handle_semaphore:
         logging.info(f"Handling message {message.id} from {message.author.name} in {message.channel.name}")
@@ -525,10 +569,15 @@ async def handle_message(message: discord.Message):
             if user_id in bypass_user_ids:
                 typing_duration = random.uniform(0, 1)  # Near-zero typing delay for bypassed users
             else:
-                typing_duration = random.uniform(0, 5)  # Default typing cooldown
+                typing_duration = random.uniform(3, 5)  # Default typing cooldown
+
+            permissions = message.channel.permissions_for(message.guild.me) if message.guild else None
+            if not permissions or not permissions.send_messages:
+                logging.warning("Missing permissions to send messages in this channel.")
+                return
 
             async with message.channel.typing():
-                await asyncio.sleep(typing_duration)
+                await asyncio.sleep(typing_duration)  # Simulate a delay for typing
 
                 server_name = message.guild.name if message.guild else "a private chat"
                 ai_response, _ = await get_ai_response(
@@ -541,7 +590,6 @@ async def handle_message(message: discord.Message):
                 if ai_response:
                     max_length = 4000  # Discord's message character limit
 
-                    # Send response in chunks if it's too long
                     if len(ai_response) > max_length:
                         for chunk in [ai_response[i:i+max_length] for i in range(0, len(ai_response), max_length)]:
                             try:
@@ -552,17 +600,13 @@ async def handle_message(message: discord.Message):
                                     return
                         return
 
-                    # Keywords for image generation
                     IMAGE_GENERATION_KEYWORDS = ["generate", "image", "picture"]
                     use_user_prompt = any(kw in message.content.lower() for kw in IMAGE_GENERATION_KEYWORDS)
 
-                    # 10% chance of image (or user explicitly asks)
                     include_image = use_user_prompt or (random.random() < 0.10)
 
-                    # 10% chance of TTS voice
                     include_voice = (random.random() < 0.10)
 
-                    permissions = message.channel.permissions_for(message.guild.me) if message.guild else None
                     can_attach_files = permissions and permissions.attach_files
 
                     if include_image and can_attach_files:
@@ -706,105 +750,261 @@ async def clear_queue(queue: asyncio.Queue):
     except Exception as e:
         logging.error(f"Error clearing the queue: {e}")
 
+
 @bot.event
 async def on_message(message):
-    """
-    Handles all incoming messages to determine if the bot should respond.
-    """
-    try:
-        if message.author == bot.user:
-            return
 
-        if not message.guild:  # This is a direct message
-            async with message.channel.typing():
-                ai_response, _ = await get_ai_response(
-                    message.channel.id,
-                    message.content,
-                    message.author.name,
-                    "Direct Message"
-                )
+    if message.author == bot.user:
+        return
 
-                if ai_response:
-                    await message.reply(ai_response, mention_author=False)
-                else:
-                    await message.reply(
-                        "Sorry, I couldn't generate a response. Please try again.",
-                        mention_author=False
-                    )
-            return
+    if str(message.author.id) in blocklist:
+        logging.info(f"Message ignored from blocklisted user: {message.author.id}")
+        return
 
-        if message.content.strip().lower() in ["!.!reset", "reset !.!", "!.! reset"]:
+
+    if message.guild and str(message.guild.id) in server_blacklist:
+        logging.info(f"Message ignored from blacklisted server: {message.guild.id}")
+        return
+
+    command_triggers = [
+        "!.!reset",
+        "!.!help",
+        "!.!tts",
+        "!.!generate",
+        "!.!insane",
+        "!.!normal",
+        "!.!channel"
+    ]
+    msg_lower = message.content.strip().lower()
+    current_time = time.time()
+    channel_id = message.channel.id
+
+    if not hasattr(bot, 'help_command_usage'):
+        bot.help_command_usage = {}
+    if not hasattr(bot, 'channel_command_cooldowns'):
+        bot.channel_command_cooldowns = {}
+
+    matched_command = None
+    for command in command_triggers:
+        if msg_lower.startswith(command):
+            matched_command = command
+            break
+
+    if matched_command is not None:
+        last_used = bot.channel_command_cooldowns.setdefault(channel_id, {}).get(matched_command, 0)
+
+        if matched_command != "!.!help":
+            if current_time - last_used < 120:
+                await message.add_reaction("⏳")
+                await asyncio.sleep(1)
+                await message.add_reaction("❌")
+                return
+            bot.channel_command_cooldowns[channel_id][matched_command] = current_time
+
+        if matched_command == "!.!insane":
             async with message.channel.typing():
                 try:
-                    reset_conversation_history(message.channel.id)
+                    reset_conversation_history(channel_id)
+                    set_ai_model(channel_id, "euryale-70b")
 
-                    if message.channel.id in channel_queues:
-                        await clear_queue(channel_queues[message.channel.id])
+                    if channel_id in channel_queues:
+                        await clear_queue(channel_queues[channel_id])
 
                     await message.add_reaction("✅")
-                    logging.info(f"Conversation history and queue reset for channel {message.channel.id}")
+                    await message.reply(
+                        "Conversation history reset, and AI model changed to 'euryale-70b'. ***Replies will now be longer, more insane and funnier***",
+                        mention_author=False
+                    )
+                    logging.info(f"Conversation history reset and model changed for channel {channel_id}")
                 except Exception as e:
-                    logging.error(f"Error resetting conversation history for channel {message.channel.id}: {e}")
-                    try:
-                        await message.add_reaction("❌")
-                    except discord.errors.Forbidden:
-                        logging.warning(f"Failed to add reaction in channel {message.channel.id}")
+                    logging.error(f"Error processing !.!insane for channel {channel_id}: {e}")
+                    await message.add_reaction("❌")
             return
 
-        if str(message.author.id) in blocklist:
-            logging.info(f"Message ignored from blocklisted user: {message.author.id}")
-            return
-
-        if message.guild and str(message.guild.id) in server_blacklist:
-            logging.info(f"Message ignored from blacklisted server: {message.guild.id}")
-            return
-
-        user_id = message.author.id
-        channel_id = message.channel.id
-        current_time = asyncio.get_event_loop().time()
-
-        if channel_id not in channel_last_reply_times:
-            channel_last_reply_times[channel_id] = {}
-
-        if user_id in bypass_user_ids:
-            message_cooldown = 0.1  # Minimal delay for bypassed users
-        else:
-            message_cooldown = 25  # Default delay for regular users
-
-        last_reply_time = channel_last_reply_times[channel_id].get(user_id, 0)
-
-        if (current_time - last_reply_time < message_cooldown
-                and not (bot.user in message.mentions or message.reference)):
-            logging.info(
-                f"Message from user {user_id} in channel {channel_id} ignored due to rate limiting ({message_cooldown}s)."
-            )
-            return
-
-        channel_last_reply_times[channel_id][user_id] = current_time
-
-        if channel_id not in channel_queues:
-            channel_queues[channel_id] = asyncio.Queue()
-
-        should_reply = (
-            bot.user in message.mentions
-            or any(keyword.lower() in message.content.lower() for keyword in keywords)
-            or secrets.randbelow(1000) < 7  # 0.7% chance
-        )
-
-        if should_reply and not queue_contains_message(channel_queues[channel_id], message):
+        elif matched_command == "!.!normal":
             async with message.channel.typing():
                 try:
-                    await channel_queues[channel_id].put(message)
-                    logging.info(f"Message {message.id} added to queue for channel {channel_id}")
-                except Exception as e:
-                    logging.error(f"Failed to add message {message.id} to queue for channel {message.channel.id}: {e}")
+                    reset_conversation_history(channel_id)
+                    set_ai_model(channel_id, "grok-2-larp")
 
+                    await message.add_reaction("✅")
+                    await message.reply(
+                        "Conversation history reset, and AI model changed back to 'grok-2-larp'. ***Replies will now be shorter and more stable***",
+                        mention_author=False
+                    )
+                    logging.info(f"Conversation history reset and model set to grok-2-larp for channel {channel_id}")
+                except Exception as e:
+                    logging.error(f"Error processing !.!normal for channel {channel_id}: {e}")
+                    await message.add_reaction("❌")
+            return
+
+        elif matched_command == "!.!reset":
+            async with message.channel.typing():
+                try:
+                    reset_conversation_history(channel_id)
+
+                    if channel_id in channel_queues:
+                        await clear_queue(channel_queues[channel_id])
+
+                    await message.add_reaction("✅")
+                    logging.info(f"Conversation history reset for channel {channel_id}")
+                except Exception as e:
+                    logging.error(f"Error resetting conversation history for channel {channel_id}: {e}")
+                    await message.add_reaction("❌")
+            return
+
+        elif matched_command == "!.!channel":
+            async with message.channel.typing():
+                try:
+                    current_model = get_ai_model(channel_id)
+                    current_mode = "Insane 🔥" if current_model == "euryale-70b" else "Default 🌟"
+                    channel_name = message.channel.name
+
+                    channel_info = (
+                        f"**📢 Channel Information**\n"
+                        f"**🔹 Channel Name:** {channel_name}\n"
+                        f"**🔹 Channel ID:** `{channel_id}`\n"
+                        f"**🔹 AI Model:** `{current_model}`\n"
+                        f"**🔹 Mode:** {current_mode}\n\n"
+                        f"🤖 **Bot Status:** Active and listening!"
+                    )
+
+                    await message.reply(channel_info, mention_author=False)
+                    logging.info(f"Displayed channel information for {channel_name} (ID: {channel_id})")
+                except Exception as e:
+                    logging.error(f"Error displaying channel information: {e}")
+                    await message.add_reaction("❌")
+            return
+
+        elif matched_command == "!.!help":
+            user_id = message.author.id
+            last_help_used = bot.help_command_usage.get(user_id, 0)
+            if current_time - last_help_used < 5 * 60:
+                await message.add_reaction("⏳")
+                await asyncio.sleep(1)
+                await message.add_reaction("❌")
+                return
+
+            bot.help_command_usage[user_id] = current_time
+
+            help_message = (
+                "**Bot Commands:**\n"
+                "!.!reset - Reset the conversation history.\n"
+                "!.!tts [prompt] - Generate a TTS voice message.\n"
+                "!.!generate [prompt] - Generate an AI image.\n"
+                "!.!insane - Reset history and switch to 'euryale-70b'. (longer, crazier replies)\n"
+                "!.!normal - Reset history and switch back to 'grok-2-larp'. (shorter, stable replies)\n"
+                "!.!channel - Display information about the current channel.\n"
+                "!.!help - Display this help message (usable once every 5 minutes).\n\n"
+                "⚠️ **Note**: All commands (except !.!help) have a cooldown of 2 minutes for repeated use."
+            )
+
+            await message.reply(help_message, mention_author=False)
+            return
+
+        elif matched_command == "!.!tts":
+            prompt = message.content[len("!.!tts"):].strip()
+            if not prompt:
+                await message.add_reaction("❌")
+                return
+
+            permissions = message.channel.permissions_for(message.guild.me) if message.guild else None
+            if message.guild and (not permissions or not permissions.attach_files):
+                await message.add_reaction("❌")
+                return
+
+            async with message.channel.typing():
+                async with tts_lock:
+                    temp_file = await generate_voice_audio(prompt)
+                    if not temp_file or not os.path.exists(temp_file):
+                        logging.error("TTS audio generation failed; reacting with ❌.")
+                        await message.add_reaction("❌")
+                        return
+
+                    output_ogg = "voice-message.ogg"
+                    try:
+                        convert_to_ogg(temp_file, output_ogg)
+                    except subprocess.CalledProcessError as e:
+                        logging.error(f"FFmpeg conversion failed: {e}")
+                        await message.add_reaction("❌")
+                        if os.path.exists(temp_file):
+                            os.remove(temp_file)
+                        return
+
+                    if os.path.exists(temp_file):
+                        os.remove(temp_file)
+
+                    await send_voice_message(message.channel, output_ogg)
+                    if os.path.exists(output_ogg):
+                        os.remove(output_ogg)
+            return
+
+        elif matched_command == "!.!generate":
+            prompt = message.content[len("!.!generate"):].strip()
+            if not prompt:
+                await message.add_reaction("❌")
+                return
+
+            permissions = message.channel.permissions_for(message.guild.me) if message.guild else None
+            if message.guild and (not permissions or not permissions.attach_files):
+                await message.add_reaction("❌")
+                return
+
+            async with message.channel.typing():
+                try:
+                    await generate_random_image(message, f"Here is your image for: {prompt}", use_user_prompt=True)
+                except Exception as e:
+                    logging.error(f"Error in generating image: {e}")
+                    await message.add_reaction("❌")
+            return
+
+    guaranteed_keywords = [
+        "bob", "welcome", "hello", "hi", "haii", "hewwo", "hiii",
+        "afternoon", "evening", "good morning", "morning", "good",
+        "bot", "AI", "ai"
+    ]
+
+    if any(keyword in msg_lower for keyword in guaranteed_keywords):
+        should_respond = True
+    else:
+        # 2% chance to respond
+        should_respond = (secrets.randbelow(100) < 2)
+
+    if not should_respond:
+        return
+    try:
+        permissions = message.channel.permissions_for(message.guild.me) if message.guild else None
+        if not permissions or not permissions.send_messages:
+            logging.warning("Missing permissions to send messages in this channel.")
+            return
+
+        async with message.channel.typing():
+            model = get_ai_model(channel_id)
+            ai_response, _ = await get_ai_response(
+                message.channel.id,
+                message.content,
+                message.author.name,
+                message.guild.name if message.guild else "Direct Message",
+                model=model
+            )
+
+            if ai_response:
+                await message.reply(ai_response, mention_author=False)
+            else:
+                await message.reply(
+                    "Sorry, I couldn't generate a response. Please try again.",
+                    mention_author=False
+                )
     except discord.errors.Forbidden as e:
-        logging.warning(f"Missing permissions to handle message: {e}")
+        logging.warning(f"Missing permission to reply in this channel: {e}")
     except discord.errors.NotFound as e:
-        logging.warning(f"Message not found or already deleted: {message.id if hasattr(message, 'id') else 'Unknown'}")
+        logging.warning(f"Message not found or already deleted: {e}")
     except Exception as e:
-        logging.exception(f"Unhandled error in on_message: {e}")
+        logging.exception(f"Unhandled error in on_message (AI response): {e}")
+        try:
+            await message.reply("An unexpected error occurred. Please try again later.", mention_author=False)
+        except discord.errors.Forbidden:
+            pass
 
 def queue_contains_message(queue, message):
     """
@@ -850,12 +1050,25 @@ async def on_ready():
     reply_queue = asyncio.Queue()
     bot.loop.create_task(process_queue())
     random_message_task.start()
+    rotate_status.start()
 
     if not reboot_task_started:
         bot.loop.create_task(schedule_reboot())
         reboot_task_started = True
 
     logging.info(f'Logged in as {bot.user}!')
+
+status_list = [
+    "do !.!help for commands!",
+    "www.bytelabs.site",
+    "Listening to you!",
+    "developed by @kurope",
+]
+
+@tasks.loop(minutes=10)
+async def rotate_status():
+    new_status = random.choice(status_list)
+    await bot.change_presence(activity=discord.Game(name=new_status))
 
 async def main():
     initialize_database()
