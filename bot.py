@@ -957,15 +957,14 @@ async def on_message(message):
                     await message.add_reaction("❌")
             return
 
-    forced_respond = False
 
-    if message.reference:
-        ref_message = message.reference.resolved
-        if ref_message and ref_message.author == bot.user:
-            forced_respond = True
+    mention_or_reply = False
 
     if bot.user in message.mentions:
-        forced_respond = True
+        mention_or_reply = True
+    elif message.reference and message.reference.resolved:
+        if message.reference.resolved.author.id == bot.user.id:
+            mention_or_reply = True
 
     guaranteed_keywords = [
         "bob", "welcome", "hello", "hi", "haii", "hewwo", "hiii",
@@ -973,17 +972,21 @@ async def on_message(message):
         "bot", "AI", "ai"
     ]
 
-    if any(keyword in msg_lower for keyword in guaranteed_keywords):
+    if mention_or_reply:
         should_respond = True
     else:
-        should_respond = (secrets.randbelow(100) < 2)
+        if any(keyword in msg_lower for keyword in guaranteed_keywords):
+            should_respond = True
+        else:
+            # 2% chance to respond
+            should_respond = (secrets.randbelow(100) < 2)
 
-    if not forced_respond and not should_respond:
+    if not should_respond:
         return
 
     try:
         permissions = message.channel.permissions_for(message.guild.me) if message.guild else None
-        if not permissions or not permissions.send_messages:
+        if message.guild and (not permissions or not permissions.send_messages):
             logging.warning("Missing permissions to send messages in this channel.")
             return
 
@@ -1055,20 +1058,6 @@ def run_bot():
     finally:
         loop.close()
 
-@bot.event
-async def on_ready():
-    global reply_queue, reboot_task_started
-    reply_queue = asyncio.Queue()
-    bot.loop.create_task(process_queue())
-    random_message_task.start()
-    rotate_status.start()
-
-    if not reboot_task_started:
-        bot.loop.create_task(schedule_reboot())
-        reboot_task_started = True
-
-    logging.info(f'Logged in as {bot.user}!')
-
 status_list = [
     "do !.!help for commands!",
     "www.bytelabs.site",
@@ -1078,8 +1067,29 @@ status_list = [
 
 @tasks.loop(minutes=10)
 async def rotate_status():
+    """
+    Periodically rotate the bot's status from a list of possible statuses.
+    """
     new_status = random.choice(status_list)
-    await bot.change_presence(activity=discord.Game(name=new_status))
+    try:
+        await bot.change_presence(activity=discord.Game(name=new_status))
+        logging.info(f"Rotated status to: {new_status}")
+    except Exception as e:
+        logging.error(f"Failed to set presence: {e}")
+
+@bot.event
+async def on_ready():
+    global reply_queue, reboot_task_started
+    reply_queue = asyncio.Queue()
+    bot.loop.create_task(process_queue())
+    random_message_task.start()
+    rotate_status.start()
+
+    if not reboot_task_started:  # Prevent duplicate scheduling
+        bot.loop.create_task(schedule_reboot())
+        reboot_task_started = True
+
+    logging.info(f'Logged in as {bot.user}!')
 
 async def main():
     initialize_database()
