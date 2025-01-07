@@ -761,7 +761,6 @@ async def on_message(message):
         logging.info(f"Message ignored from blocklisted user: {message.author.id}")
         return
 
-
     if message.guild and str(message.guild.id) in server_blacklist:
         logging.info(f"Message ignored from blacklisted server: {message.guild.id}")
         return
@@ -958,6 +957,16 @@ async def on_message(message):
                     await message.add_reaction("❌")
             return
 
+    forced_respond = False
+
+    if message.reference:
+        ref_message = message.reference.resolved
+        if ref_message and ref_message.author == bot.user:
+            forced_respond = True
+
+    if bot.user in message.mentions:
+        forced_respond = True
+
     guaranteed_keywords = [
         "bob", "welcome", "hello", "hi", "haii", "hewwo", "hiii",
         "afternoon", "evening", "good morning", "morning", "good",
@@ -967,11 +976,11 @@ async def on_message(message):
     if any(keyword in msg_lower for keyword in guaranteed_keywords):
         should_respond = True
     else:
-        # 2% chance to respond
         should_respond = (secrets.randbelow(100) < 2)
 
-    if not should_respond:
+    if not forced_respond and not should_respond:
         return
+
     try:
         permissions = message.channel.permissions_for(message.guild.me) if message.guild else None
         if not permissions or not permissions.send_messages:
@@ -1006,11 +1015,13 @@ async def on_message(message):
         except discord.errors.Forbidden:
             pass
 
+
 def queue_contains_message(queue, message):
     """
     Check if a message is already in the asyncio.Queue.
     """
     return any(m.id == message.id for m in queue._queue)
+
 
 MAX_CONCURRENT_HANDLES = 2
 channel_last_reply_times = {}
