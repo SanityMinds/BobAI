@@ -18,9 +18,14 @@ pip install discord.py-self aiohttp logging
 make sure you have python installed (3.7+)
 warning: **YOU CANNOT HAVE DISCORD.PY AND DISCORD.PY-SELF AT THE SAME TIME. IF THE CODE ERRORS THAT IS PROBABLY WHY**
 
-do "pip uninstall discord.py" if its already installed
+do "pip3 uninstall discord.py" if its already installed
 
 replace the tokens in the code with your own tokens to get a "zukijourney" token you must go to: [zukijourney](https://zukijourney.com/)
+replace every instance of "DISCORD_TOKEN" with your discord token
+replace every instance of "ZUKIJOURNEY_TOKEN" with your zukijourney token
+
+run the bot
+```python3 bot.py```
 
 ### Obtaining API Key and Token
 
