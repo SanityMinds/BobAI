@@ -14,7 +14,7 @@ Bob AI is a discord self bot which is designed to be an uncensored AI bot. You c
 
 do the following commands: 
 
-``pip3 install discord.py-self aiohttp logging``
+``pip3 install discord.py-self aiohttp``
 
 make sure you have python installed (3.7+)
 warning: **YOU CANNOT HAVE DISCORD.PY AND DISCORD.PY-SELF AT THE SAME TIME. IF THE CODE ERRORS THAT IS PROBABLY WHY**
