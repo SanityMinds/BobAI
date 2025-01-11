@@ -9,6 +9,7 @@ Bob AI is a discord self bot which is designed to be an uncensored AI bot. You c
 - **random reply %**
 - **Activated by keywords**
 - **custom commands**: !.!help for commands
+- **unique personalities**: Have BOB act like anything you like using the personality command!!
 
 ## Installation
 
