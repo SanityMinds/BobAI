@@ -299,10 +299,6 @@ def trim_conversation_history(history):
 # AI TEXT GENERATION
 ##############################################################################
 async def get_ai_response(channel_id, user_message, username, server_name, model=None):
-    """
-    Interact with the Zukijourney Chat Completion API to get an AI response.
-    Allows dynamic model selection based on channel settings.
-    """
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     history = load_conversation_history(channel_id)
 
@@ -361,11 +357,6 @@ async def get_ai_response(channel_id, user_message, username, server_name, model
 # IMAGE GENERATION
 ##############################################################################
 async def generate_random_image(message, ai_response, use_user_prompt=False):
-    """
-    Generates an image from the Zukijourney image API.
-    If user_prompt is True, use the user's message as the prompt; otherwise use a random fallback.
-    Attaches the generated image along with the AI text response in the reply to the user.
-    """
     permissions = message.channel.permissions_for(message.guild.me) if message.guild else None
     if permissions is not None and not permissions.attach_files:
         logging.warning(f"No permission to send attachments in channel {message.channel.id}")
@@ -452,10 +443,6 @@ async def generate_random_image(message, ai_response, use_user_prompt=False):
 # VOICE MESSAGE HELPER FUNCTIONS
 ##############################################################################
 def convert_to_ogg(input_file_path: str, output_file_path: str):
-    """
-    Convert an audio file to Opus-encoded .ogg using ffmpeg.
-    Requires ffmpeg installed on the system.
-    """
     subprocess.run([
         "ffmpeg", "-y",
         "-i", input_file_path,
@@ -464,10 +451,6 @@ def convert_to_ogg(input_file_path: str, output_file_path: str):
     ], check=True)
 
 async def generate_voice_audio(text: str) -> str:
-    """
-    Calls the Zukijourney TTS (audio generation) API to create a voice audio file.
-    Returns the local file path of the downloaded audio.
-    """
     temp_audio_file = "temp_audio_output.mp3"
 
     voices = [
@@ -665,10 +648,6 @@ async def process_channel_queue(channel_id, queue):
 channel_queues = {}
 
 async def handle_message(message: discord.Message):
-    """
-    Handles an incoming message and processes it through the bot logic.
-    Simulates typing, handles permissions, and generates AI responses or other outputs.
-    """
     async with handle_semaphore:
         try:
             channel_name = message.channel.name if hasattr(message.channel, 'name') else "Direct Message"
@@ -828,10 +807,6 @@ async def random_message_task():
 ##############################################################################
 @tasks.loop(minutes=30)
 async def random_message_task():
-    """
-    Periodically sends random AI-generated messages in random channels
-    of random eligible servers.
-    """
     try:
         eligible_guilds = [
             guild for guild in bot.guilds
@@ -880,9 +855,6 @@ async def random_message_task():
 # BOT EVENTS
 ##############################################################################
 async def clear_queue(queue: asyncio.Queue):
-    """
-    Clears all items from the specified asyncio.Queue.
-    """
     try:
         while not queue.empty():
             await queue.get()
@@ -1143,9 +1115,6 @@ async def handle_normal_mode(message):
 
 
 async def handle_reset(message):
-    """
-    Reset the conversation history **and** set the personality back to 'default'
-    """
     async with message.channel.typing():
         try:
             reset_conversation_history(message.channel.id)
@@ -1341,9 +1310,6 @@ status_list = [
 
 @tasks.loop(minutes=10)
 async def rotate_status():
-    """
-    Periodically rotate the bot's status from a list of possible statuses.
-    """
     new_status = random.choice(status_list)
     try:
         await bot.change_presence(activity=discord.Game(name=new_status))
