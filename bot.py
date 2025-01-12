@@ -39,10 +39,6 @@ user_message_times = {}
 # PERSONALITIES / SYSTEM MESSAGES
 ##############################################################################
 def get_personality(channel_id: str) -> str:
-    """
-    Retrieve the currently assigned personality (if any) for a channel from the database.
-    Defaults to 'default' if none is found.
-    """
     conn = connect_db()
     try:
         c = conn.cursor()
@@ -59,15 +55,12 @@ def get_personality(channel_id: str) -> str:
         conn.close()
 
 def set_personality(channel_id: str, personality: str):
-    """
-    Store the chosen personality for a channel in the database.
-    """
     conn = connect_db()
     try:
         c = conn.cursor()
         c.execute('''
             INSERT INTO channel_settings (channel_id, model, personality)
-            VALUES (?, 'grok-2-larp', ?)
+            VALUES (?, 'WizardLM-2-8x22B', ?)
             ON CONFLICT(channel_id) DO UPDATE SET personality = ?
         ''', (channel_id, personality, personality))
         conn.commit()
@@ -168,15 +161,16 @@ blocklist = [
     "1299449139985387591",
     "1188250880701649028",
     "1043538457483546674"
-]
+]  # User IDs blocked from interacting
 
 server_blacklist = [
     "1116236794267189248",
     "964215087546134578",
     "SERVER_ID_3"
-]
+]  # Servers blocked from interacting
 
 
+# List of user IDs who can bypass the default cooldown
 bypass_user_ids = [
     1234,
 ]
@@ -239,18 +233,43 @@ def setup_database():
     c.execute('''
         CREATE TABLE IF NOT EXISTS channel_settings (
             channel_id TEXT PRIMARY KEY,
-            model TEXT DEFAULT 'grok-2-larp'
+            model TEXT DEFAULT 'WizardLM-2-8x22B',
+            personality TEXT DEFAULT 'default',
+            response_mode TEXT DEFAULT 'short'
         )
     ''')
-    try:
-        c.execute("ALTER TABLE channel_settings ADD COLUMN personality TEXT DEFAULT 'default'")
-    except sqlite3.OperationalError:
-        pass
     conn.commit()
     conn.close()
 
 initialize_database()
 
+def set_response_mode(channel_id, mode):
+    conn = connect_db()
+    try:
+        c = conn.cursor()
+        c.execute('''
+            INSERT INTO channel_settings (channel_id, response_mode)
+            VALUES (?, ?)
+            ON CONFLICT(channel_id) DO UPDATE SET response_mode = ?
+        ''', (channel_id, mode, mode))
+        conn.commit()
+    except sqlite3.Error as e:
+        logging.error(f"Error updating response mode for channel {channel_id}: {e}")
+    finally:
+        conn.close()
+
+def get_response_mode(channel_id):
+    conn = connect_db()
+    try:
+        c = conn.cursor()
+        c.execute('SELECT response_mode FROM channel_settings WHERE channel_id = ?', (channel_id,))
+        row = c.fetchone()
+        return row[0] if row else 'short'
+    except sqlite3.Error as e:
+        logging.error(f"Error fetching response mode for channel {channel_id}: {e}")
+        return 'short'
+    finally:
+        conn.close()
 
 def set_ai_model(channel_id, model):
     conn = connect_db()
@@ -273,10 +292,10 @@ def get_ai_model(channel_id):
         c = conn.cursor()
         c.execute('SELECT model FROM channel_settings WHERE channel_id = ?', (channel_id,))
         row = c.fetchone()
-        return row[0] if row else 'grok-2-larp'
+        return row[0] if row else 'WizardLM-2-8x22B'
     except sqlite3.Error as e:
         logging.error(f"Error fetching AI model for channel {channel_id}: {e}")
-        return 'grok-2-larp'
+        return 'WizardLM-2-8x22B'
     finally:
         conn.close()
 
@@ -284,10 +303,6 @@ def get_ai_model(channel_id):
 # UTILITY: TRIM HISTORY
 ##############################################################################
 def trim_conversation_history(history):
-    """
-    Trims conversation to keep it at a reasonable length. 
-    Keeps the very first system prompt, plus the last 9 messages.
-    """
     if not history:
         return history
     system_message = history[0]
@@ -309,7 +324,10 @@ async def get_ai_response(channel_id, user_message, username, server_name, model
     history = trim_conversation_history(history)
 
     if not model:
-        model = get_ai_model(channel_id)  # Get the AI model from the database
+        model = get_ai_model(channel_id)
+
+    # Determine the response mode (short or long) for the channel
+    response_mode = get_response_mode(channel_id)
 
     async with aiohttp.ClientSession() as session:
         for attempt in range(1, 4):  # Up to 3 retries
@@ -318,7 +336,7 @@ async def get_ai_response(channel_id, user_message, username, server_name, model
                     "https://api.zukijourney.com/v1/chat/completions",
                     headers={"Authorization": "Bearer ZUKIJOURNEY_TOKEN"},
                     json={
-                        "model": model,  # Use the dynamic model
+                        "model": model,
                         "messages": history,
                         "temperature": 0.7
                     }
@@ -329,10 +347,16 @@ async def get_ai_response(channel_id, user_message, username, server_name, model
                     if response.status == 200:
                         data = await response.json()
                         ai_response = data['choices'][0]['message']['content']
+
+                        # Trim the response if in short mode
+                        if response_mode == "short":
+                            ai_response = ai_response.split("\n\n")[0]
+
+                        ai_response = ai_response.replace("bob:", "").replace("Bob:", "").replace(":", "").strip()
+
                         history.append({"role": "assistant", "content": ai_response})
                         save_conversation_history(channel_id, history)
 
-                        ai_response = ai_response.replace("bob:", "").replace("Bob:", "").replace(":", "").strip()
                         return ai_response, data
 
                     elif response.status == 429:
@@ -593,7 +617,7 @@ async def send_voice_message(channel: discord.TextChannel, file_path: str):
         encoded_waveform = base64.b64encode(bytes(placeholder_waveform)).decode("utf-8")
 
         voice_msg_json = {
-            "flags": 8192,  # IS_VOICE_MESSAGE
+            "flags": 8192,
             "attachments": [
                 {
                     "id": "0",
@@ -624,7 +648,7 @@ async def send_voice_message(channel: discord.TextChannel, file_path: str):
 # REPLY QUEUE + MESSAGE HANDLER
 ##############################################################################
 async def process_queue():
-    tasks_map = {}  # Track tasks by channel_id
+    tasks_map = {}
 
     while True:
         await asyncio.sleep(0.001)
@@ -634,14 +658,11 @@ async def process_queue():
                 tasks_map[channel_id] = asyncio.create_task(process_channel_queue(channel_id, queue))
 
 async def process_channel_queue(channel_id, queue):
-    """
-    Processes messages in a specific channel's queue.
-    """
     while not queue.empty():
-        message = await queue.get()  # Get the next message from the queue
+        message = await queue.get()
         try:
             logging.info(f"Processing message {message.id} in channel {channel_id}")
-            await handle_message(message)  # Process the message
+            await handle_message(message)
         except Exception as e:
             logging.error(f"Error processing message in channel {channel_id}: {e}")
 
@@ -658,9 +679,9 @@ async def handle_message(message: discord.Message):
             user_id = message.author.id
 
             if user_id in bypass_user_ids:
-                typing_duration = random.uniform(0, 1)  # Near-zero typing delay for bypassed users
+                typing_duration = random.uniform(0, 1)
             else:
-                typing_duration = random.uniform(3, 5)  # Default typing cooldown
+                typing_duration = random.uniform(3, 5)
 
             permissions = message.channel.permissions_for(message.guild.me) if message.guild else None
             if message.guild and (not permissions or not permissions.send_messages):
@@ -668,7 +689,7 @@ async def handle_message(message: discord.Message):
                 return
 
             async with message.channel.typing():
-                await asyncio.sleep(typing_duration)  # Simulate a delay for typing
+                await asyncio.sleep(typing_duration)
 
                 ai_response, _ = await get_ai_response(
                     message.channel.id,
@@ -686,7 +707,7 @@ async def handle_message(message: discord.Message):
 
                 response_type = random.choices(
                     ["text", "tts", "image"], 
-                    weights=[80, 10, 10],  # Adjust weights as you like
+                    weights=[80, 10, 10],
                     k=1
                 )[0]
                 logging.info(f"Selected response type: {response_type}")
@@ -753,10 +774,6 @@ async def handle_message(message: discord.Message):
 ##############################################################################
 @tasks.loop(minutes=30)
 async def random_message_task():
-    """
-    Periodically sends random AI-generated messages in random channels
-    of random eligible servers.
-    """
     try:
         eligible_guilds = [
             guild for guild in bot.guilds
@@ -886,7 +903,9 @@ async def on_message(message):
         "!.!normal",
         "!.!channel",
         "!.!personality",
-        "!.!personalities"
+        "!.!personalities",
+        "!.!short"
+        "!.!long"
     ]
 
     matched_command = next((cmd for cmd in command_triggers if msg_lower.startswith(cmd)), None)
@@ -903,12 +922,12 @@ async def on_message(message):
             logging.info(f"Ignored non-command message from {user_id} due to rapid messaging.")
             return
 
-    user_message_times[user_id] = current_time  # Update timestamp for this user
+    user_message_times[user_id] = current_time
 
     should_respond = False
     mention_or_reply = False
 
-    if isinstance(message.channel, discord.DMChannel):  # Always respond in DMs
+    if isinstance(message.channel, discord.DMChannel):
         should_respond = True
     else:
         if bot.user in message.mentions:
@@ -955,9 +974,6 @@ async def on_message(message):
         await message.add_reaction("❌")
 
 def queue_contains_message(queue, message):
-    """
-    Check if a message is already in the asyncio.Queue.
-    """
     return any(m.id == message.id for m in queue._queue)
 
 
@@ -979,42 +995,78 @@ async def handle_command(message, command):
 
     if command == "!.!help":
         pass
-    elif command == "!.!personality":
-        cooldown = 30  # 1 minute for personality
+    elif command in ["!.!short", "!.!long"]:
+        cooldown = 30  # 30 seconds for short/long toggle
     else:
-        cooldown = 60  # 2 minutes default for other commands
+        cooldown = 60  # Default 1-minute cooldown
 
-    if command != "!.!help":
-        if current_time - last_used < cooldown:
-            await message.add_reaction("⏳")
-            await asyncio.sleep(1)  # Brief delay before adding ❌
-            await message.add_reaction("❌")
-            return
+    if command != "!.!help" and current_time - last_used < cooldown:
+        await message.add_reaction("⏳")
+        await asyncio.sleep(1) 
+        await message.add_reaction("❌")
+        return
 
     if command != "!.!help":
         bot.channel_command_cooldowns[channel_id][command] = current_time
 
-    if command == "!.!insane":
-        await handle_insane_mode(message)
-    elif command == "!.!normal":
-        await handle_normal_mode(message)
-    elif command == "!.!reset":
-        await handle_reset(message)
-    elif command == "!.!channel":
-        await handle_channel_info(message)
-    elif command == "!.!help":
-        await handle_help(message)
-    elif command == "!.!tts":
-        await handle_tts_command(message)
-    elif command == "!.!generate":
-        await handle_image_command(message)
-    elif command == "!.!personality":
-        await handle_personality_command(message)
-    elif command == "!.!personalities":
-        await handle_personalities_command(message)
-    else:
-        logging.warning(f"Unhandled command: {command}")
+    try:
+        if command == "!.!short":
+            await handle_short_command(message)
+        elif command == "!.!long":
+            await handle_long_command(message)
+        elif command == "!.!insane":
+            await handle_insane_mode(message)
+        elif command == "!.!normal":
+            await handle_normal_mode(message)
+        elif command == "!.!reset":
+            await handle_reset(message)
+        elif command == "!.!channel":
+            await handle_channel_info(message)
+        elif command == "!.!help":
+            await handle_help(message)
+        elif command == "!.!tts":
+            await handle_tts_command(message)
+        elif command == "!.!generate":
+            await handle_image_command(message)
+        elif command == "!.!personality":
+            await handle_personality_command(message)
+        elif command == "!.!personalities":
+            await handle_personalities_command(message)
+        else:
+            logging.warning(f"Unhandled command: {command}")
+            await message.add_reaction("❓")
+    except Exception as e:
+        logging.exception(f"Error handling command {command}: {e}")
+        await message.add_reaction("❌")
 
+
+async def handle_short_command(message):
+    try:
+        set_response_mode(message.channel.id, 'short')
+        reset_conversation_history(message.channel.id)
+        await message.add_reaction("✅")
+        await message.reply(
+            "Response mode set to **short**. AI will now respond in one-liners.",
+            mention_author=True
+        )
+        logging.info(f"Set response mode to short for channel {message.channel.id}")
+    except Exception as e:
+        logging.error(f"Error setting response mode to short for channel {message.channel.id}: {e}")
+        await message.add_reaction("❌")
+
+async def handle_long_command(message):
+    try:
+        set_response_mode(message.channel.id, 'long')
+        reset_conversation_history(message.channel.id)
+        await message.add_reaction("✅")
+        await message.reply(
+            "Response mode set to **long**. AI will now respond without length limits.",
+            mention_author=True
+        )
+        logging.info(f"Set response mode to long for channel {message.channel.id}")
+    except Exception as e:
+        logging.error(f"Error setting response mode to long for channel {message.channel.id}: {e}")
+        await message.add_reaction("❌")
 
 async def handle_personality_command(message):
     personality_map = {
@@ -1040,9 +1092,11 @@ async def handle_personality_command(message):
         return
 
     requested_raw = parts[1].strip().lower()
+    # Attempt to map the requested keyword to a final personality
     personality = personality_map.get(requested_raw)
 
     if not personality:
+        # We still do a final check to see if the user typed EXACT name:
         valid_personalities = ["cringe", "lolcat", "asian dad"]
         if requested_raw in valid_personalities:
             personality = requested_raw
@@ -1056,10 +1110,12 @@ async def handle_personality_command(message):
 
     try:
         async with message.channel.typing():
+            # Reset conversation
             reset_conversation_history(message.channel.id)
             if message.channel.id in channel_queues:
                 await clear_queue(channel_queues[message.channel.id])
 
+            # Set personality in database
             set_personality(message.channel.id, personality)
 
             await message.add_reaction("✅")
@@ -1099,14 +1155,14 @@ async def handle_normal_mode(message):
     async with message.channel.typing():
         try:
             reset_conversation_history(message.channel.id)
-            set_ai_model(message.channel.id, "grok-2-larp")
+            set_ai_model(message.channel.id, "WizardLM-2-8x22B")
 
             await message.add_reaction("✅")
             await message.reply(
-                "Conversation history reset, and AI model changed back to 'grok-2-larp'. ***Replies will now be shorter and more stable***",
+                "Conversation history reset, and AI model changed back to 'WizardLM-2-8x22B'. ***Replies will now be shorter and more stable***",
                 mention_author=True
             )
-            logging.info(f"Conversation history reset and model set to grok-2-larp for channel {message.channel.id}")
+            logging.info(f"Conversation history reset and model set to WizardLM-2-8x22B for channel {message.channel.id}")
         except Exception as e:
             logging.error(f"Error processing normal mode for channel {message.channel.id}: {e}")
             await message.add_reaction("❌")
@@ -1118,7 +1174,7 @@ async def handle_reset(message):
     async with message.channel.typing():
         try:
             reset_conversation_history(message.channel.id)
-            set_personality(message.channel.id, "default")
+            set_personality(message.channel.id, "default")  # <--- Added line
 
             if message.channel.id in channel_queues:
                 await clear_queue(channel_queues[message.channel.id])
@@ -1133,29 +1189,27 @@ async def handle_reset(message):
 
 
 async def handle_channel_info(message):
-    """
-    Displays info about the channel, including the AI model and personality.
-    """
     async with message.channel.typing():
         try:
+            # Get the current model, personality, and response mode
             current_model = get_ai_model(message.channel.id)
             current_mode = "Insane 🔥" if current_model == "euryale-70b" else "Default 🌟"
-            channel_name = message.channel.name
-
             current_personality = get_personality(message.channel.id)
+            current_response_mode = get_response_mode(message.channel.id)  # Fetch short/long mode
 
             channel_info = (
                 f"**📢 Channel Information**\n"
-                f"**🔹 Channel Name:** {channel_name}\n"
+                f"**🔹 Channel Name:** {message.channel.name}\n"
                 f"**🔹 Channel ID:** `{message.channel.id}`\n"
                 f"**🔹 AI Model:** `{current_model}`\n"
                 f"**🔹 Mode:** {current_mode}\n"
-                f"**🔹 Personality:** `{current_personality}`\n\n"
+                f"**🔹 Personality:** `{current_personality}`\n"
+                f"**🔹 Response Mode:** `{current_response_mode.capitalize()}`\n\n"
                 f"🤖 **Bot Status:** Active and listening!"
             )
 
             await message.reply(channel_info, mention_author=True)
-            logging.info(f"Displayed channel information for {channel_name} (ID: {message.channel.id})")
+            logging.info(f"Displayed channel information for {message.channel.name} (ID: {message.channel.id})")
         except Exception as e:
             logging.error(f"Error displaying channel information: {e}")
             await message.add_reaction("❌")
@@ -1170,7 +1224,6 @@ async def handle_help(message):
         bot.help_command_usage = {}
     last_help_used = bot.help_command_usage.get(user_id, 0)
 
-    # 5-minute user-based cooldown for !.!help
     if current_time - last_help_used < 5 * 60:  # 5-minute cooldown
         await message.add_reaction("⏳")
         await asyncio.sleep(1)
@@ -1185,10 +1238,12 @@ async def handle_help(message):
         "!.!tts [prompt] - Generate a TTS voice message.\n"
         "!.!generate [prompt] - Generate an AI image.\n"
         "!.!insane - Reset history and switch to 'euryale-70b'. (longer, crazier replies)\n"
-        "!.!normal - Reset history and switch back to 'grok-2-larp'. (shorter, stable replies)\n"
+        "!.!normal - Reset history and switch back to 'WizardLM-2-8x22B'. (shorter, stable replies)\n"
         "!.!channel - Display information about the current channel (including personality).\n"
         "!.!personality [name] - Reset history & change system personality to 'cringe', 'LOLCAT', or 'asian dad'.\n"
         "!.!personalities - View all available personalities and how they act.\n"
+        "!.!long - change the current mode. This will make it so the AI does not shorten it's responses\n\n"
+        "!.!short - the default mode. This shortens AI responses and makes messages less spammy and lengthy. Cuts things off.\n\n"
         "!.!help - Display this help message (usable once every 5 minutes).\n\n"
         "⚠️ **Note**: Most commands have a 2-minute channel cooldown, **!.!personality** has a 1-minute cooldown, "
         "and this help command has a 5-minute user-based cooldown."
@@ -1277,9 +1332,6 @@ async def handle_image_command(message):
 # REBOOT TASK
 ##############################################################################
 async def schedule_reboot():
-    """
-    Reboots the bot after 5 hours of runtime, by restarting the script.
-    """
     try:
         await asyncio.sleep(1 * 60 * 60)  # Wait for 5 hours
         logging.info("Rebooting the bot after 1 hour.")
