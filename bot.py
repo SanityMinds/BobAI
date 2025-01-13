@@ -14,6 +14,7 @@ import subprocess
 import secrets
 import base64
 import time
+import re
 
 logging.basicConfig(
     level=logging.INFO,
@@ -890,7 +891,7 @@ async def clear_queue(queue: asyncio.Queue):
 @bot.event
 async def on_message(message):
     if message.author == bot.user:
-        return  # Ignore bot's own messages
+        return
 
     if str(message.author.id) in blocklist:
         logging.info(f"Message ignored from blocklisted user: {message.author.id}")
@@ -912,18 +913,16 @@ async def on_message(message):
         "!.!channel",
         "!.!personality",
         "!.!personalities",
-        "!.!short"
-        "!.!long"
+        "!.!short",
+        "!.!long",
     ]
 
-    # Check if the message is a command
     matched_command = next((cmd for cmd in command_triggers if msg_lower.startswith(cmd)), None)
     if matched_command:
         logging.info(f"Matched command: {matched_command}")
         await handle_command(message, matched_command)
         return
 
-    # Track message timestamps to avoid rapid responses (non-command messages)
     user_id = message.author.id
     current_time = time.time()
     if user_id in user_message_times:
@@ -932,12 +931,12 @@ async def on_message(message):
             logging.info(f"Ignored non-command message from {user_id} due to rapid messaging.")
             return
 
-    user_message_times[user_id] = current_time  # Update timestamp for this user
+    user_message_times[user_id] = current_time
 
     should_respond = False
     mention_or_reply = False
 
-    if isinstance(message.channel, discord.DMChannel):  # Always respond in DMs
+    if isinstance(message.channel, discord.DMChannel):
         should_respond = True
     else:
         if bot.user in message.mentions:
@@ -947,14 +946,15 @@ async def on_message(message):
                 mention_or_reply = True
 
         guaranteed_keywords = [
-            "bob", "welcome", "hello", "hi", "haii", "hewwo", "hiii",
-            "afternoon", "evening", "good morning", "morning", "good",
-            "bot", "AI", "ai"
+            r"\bhi\b", r"\bbob\b", r"\bbobby\b", r"\bwelcome\b", r"\bwelc\b", 
+            r"\bwel\b", r"\bwelcum\b", r"\bhello\b", r"\bhaii\b", r"\bhewwo\b",
+            r"\bhiii\b", r"\bafternoon\b", r"\bevening\b", r"\bgood morning\b",
+            r"\bmorning\b", r"\bgood\b", r"\bbot\b", r"\bai\b",
         ]
 
         if mention_or_reply:
             should_respond = True
-        elif any(keyword in msg_lower for keyword in guaranteed_keywords):
+        elif any(re.search(keyword, msg_lower) for keyword in guaranteed_keywords):
             should_respond = True
         else:
             should_respond = (secrets.randbelow(100) < 2)  # Random chance in non-DMs
