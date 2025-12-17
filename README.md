@@ -22,7 +22,7 @@ warning: **YOU CANNOT HAVE DISCORD.PY AND DISCORD.PY-SELF AT THE SAME TIME. IF T
 
 do "``pip3 uninstall discord.py``" if its already installed
 
-replace the tokens in the code with your own tokens to get a "zukijourney" token you must go to: [zukijourney](https://zukijourney.com/)
+replace the tokens in the code with your own tokens to get a "zukijourney" token you must go to: [zukijourney](https://zukijourney.com/) (current code uses ELECTRON HUB)
 replace every instance of "``DISCORD_TOKEN``" with your discord token
 replace every instance of "``ZUKIJOURNEY_TOKEN``" with your zukijourney token
 
