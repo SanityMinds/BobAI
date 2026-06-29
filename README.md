@@ -167,3 +167,7 @@ Admin-only commands use `ADMIN_USER_ID` from `.env`.
 - `psutil`
 
 The bot uses only standard-library modules besides those packages. It also loads `.env` by itself, so `python-dotenv` is not required.
+
+## My recommendation
+
+I buy the NanoGPT subscription which includes 60 million tokens/wkly, 100 images daily. It doesn't include TTS so you'll have to add money to the account balance. The subscription only costs $12/monthly so it's affordable for a small project such as this and provides you with more than you need.
