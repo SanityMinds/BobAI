@@ -155,6 +155,8 @@ Common commands include:
 - `!.!edit [prompt]` with an image attachment
 
 Admin-only commands use `ADMIN_USER_ID` from `.env`.
+- `!.!send [channel ID] [instructions to AI]`
+- `!.!dm [user ID] [ instructions to AI]`
 
 ## Dependencies
 
